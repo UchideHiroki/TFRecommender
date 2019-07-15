@@ -1,1 +1,1 @@
-TensorFlowを使って色んな推薦モデルを実装したい
+TensorFlow == 1.12.0
