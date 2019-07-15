@@ -1,2 +1,1 @@
-# TensorFlowRecommender
-TensorFlowを使ってイケてる推薦モデルを作りたい
+TensorFlowを使って色んな推薦モデルを実装したい
