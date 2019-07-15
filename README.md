@@ -1,2 +1,2 @@
 # TensorFlowRecommender
-TFを使って推薦モデルを作りたい
+TensorFlowを使ってイケてる推薦モデルを作りたい
