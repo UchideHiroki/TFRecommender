@@ -1,1 +1,2 @@
 from tfrecos.model.matrix_factorization import MatrixFactorizationGrpah, MatrixFactorization
+from tfrecos.model.bayesian_personalized_ranking import BayesianPersonalizedRankingGraph, BayesianPersonalizedRanking

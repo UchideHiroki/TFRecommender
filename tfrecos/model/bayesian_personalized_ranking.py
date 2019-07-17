@@ -1,8 +1,8 @@
-
 # Created by https://github.com/m3dev/redshells/blob/master/redshells/model/matrix_factorization_model.py
 
 import numpy as np
 import sklearn
+from sklearn.model_selection import train_test_split
 from collections import defaultdict
 from copy import copy, deepcopy
 import random
@@ -16,7 +16,7 @@ logger = getLogger(__name__)
 import tensorflow as tf
 
 
-class MatrixFactorizationGrpah(object):
+class BayesianPersonalizedRankingGraph(object):
     def __init__(self,
                 n_users: int,
                 n_items: int,
@@ -27,8 +27,8 @@ class MatrixFactorizationGrpah(object):
         with tf.variable_scope(scope_name, reuse=tf.AUTO_REUSE):
             # placeholder
             self.input_user_idx = tf.placeholder(tf.int32, shape=[None], name="input_user_idx")
-            self.input_item_idx = tf.placeholder(tf.int32, shape=[None], name="input_item_idx")
-            self.input_click = tf.placeholder(tf.float32, shape=None, name="input_click")
+            self.input_item_pos_idx = tf.placeholder(tf.int32, shape=[None], name="input_item_pos_idx")
+            self.input_item_neg_idx = tf.placeholder(tf.int32, shape=[None], name="input_item_neg_idx")
             # TODO learning_rateを動的に変える
             self.input_learning_rate = tf.placeholder(tf.float32, name="input_learning_rate")
             self.input_batch_size = tf.placeholder(tf.float32, name="input_batch_size")
@@ -49,10 +49,13 @@ class MatrixFactorizationGrpah(object):
                 embeddings_initializer=initializer,
                 embeddings_regularizer=tf.contrib.layers.l2_regularizer(reg_item),
                 name="item_embedding")
-            self.item_factors = self.item_embedding(self.input_item_idx)
+            self.item_pos_factors = self.item_embedding(self.input_item_pos_idx)
+            self.item_neg_factors = self.item_embedding(self.input_item_neg_idx)
             
-            self.logit_click = tf.reduce_sum(tf.multiply(self.user_factors, self.item_factors), axis=1)
-            self.predictions = 1 / (1 + tf.exp(-self.logit_click))
+            self.y_pos = tf.reduce_sum(tf.multiply(self.user_factors, self.item_pos_factors), axis=1)
+            self.y_neg = tf.reduce_sum(tf.multiply(self.user_factors, self.item_neg_factors), axis=1)
+            # using input_item_pos_idx as input_item_idx in prediction
+            self.predictions = 1 / (1 + tf.exp(-self.y_pos))
    
         with tf.name_scope("loss"):
             # to reduce the dependency on the batch size and latent factor size.
@@ -61,10 +64,10 @@ class MatrixFactorizationGrpah(object):
             # elements: elements of loss. Finally sum them up.
             self.elements = [
                 self.user_embedding.embeddings_regularizer(self.user_factors) / adjustment,
-                self.item_embedding.embeddings_regularizer(self.item_factors) / adjustment]
+                self.item_embedding.embeddings_regularizer(self.item_pos_factors) / (adjustment*2),
+                self.item_embedding.embeddings_regularizer(self.item_neg_factors) / (adjustment*2)]            
             sigmoid_cross_entropy = tf.reduce_mean(
-                -(self.input_click * tf.log(self.predictions) + \
-                  (1 - self.input_click) * tf.log(1 - self.predictions)),
+                -tf.log(tf.subtract(self.y_pos, self.y_neg)),
                 name="error")
             self.elements.append(sigmoid_cross_entropy)
             self.loss = tf.add_n(self.elements, name="loss")
@@ -84,8 +87,8 @@ class MatrixFactorizationGrpah(object):
         # valid_batch_loss does not need.
 
         
-class MatrixFactorization(object):
-    """Matrix Factorization with only positive and implicit feedback"""
+class BayesianPersonalizedRanking(object):
+    """BayesianPersonalizedRanking"""
     def __init__(self,
                  n_latent_factors: int,
                  learning_rate: float,
@@ -160,7 +163,7 @@ class MatrixFactorization(object):
         user_indices_pos = self._convert(user_ids, self.user2index)
         item_indices_pos = self._convert(item_ids, self.item2index)
         
-        user_train_pos, user_test_pos, item_train_pos, item_test_pos = sklearn.model_selection.train_test_split(
+        user_train_pos, user_test_pos, item_train_pos, item_test_pos = train_test_split(
             user_indices_pos, item_indices_pos, test_size=self.test_size)
         self.user_train_pos = list(user_train_pos)
         self.user_test_pos = list(user_test_pos)
@@ -169,13 +172,13 @@ class MatrixFactorization(object):
         
         with self.session.as_default():
             self.train_dataset = tf.data.Dataset.from_generator(self._train_generator_with_negative_sampling_approx,
-                                                               output_types=(tf.int32, tf.int32, tf.float32),
+                                                               output_types=(tf.int32, tf.int32, tf.int32),
                                                                output_shapes=(tf.TensorShape([]),
                                                                               tf.TensorShape([]),
                                                                               tf.TensorShape([])))
             self.train_dataset = self.train_dataset.batch(self.batch_size)
             self.test_dataset = tf.data.Dataset.from_generator(self._test_generator_with_negative_sampling_approx,
-                                                              output_types=(tf.int32, tf.int32, tf.float32),
+                                                              output_types=(tf.int32, tf.int32, tf.int32),
                                                               output_shapes=(tf.TensorShape([]),
                                                                              tf.TensorShape([]),
                                                                              tf.TensorShape([])))
@@ -213,7 +216,7 @@ class MatrixFactorization(object):
             if not self.is_variables_initialized:
                 self.session.run(tf.global_variables_initializer())
             feed_dict = {self.graph.input_user_idx: user_indices[valid_inputs],
-                         self.graph.input_item_idx: item_indices[valid_inputs]}
+                         self.graph.input_item_pos_idx: item_indices[valid_inputs]}
             valid_predictions = self.session.run(self.graph.predictions, feed_dict=feed_dict)
         predictions = np.array([default]*len(user_ids))
         predictions[valid_inputs] = valid_predictions
@@ -257,8 +260,8 @@ class MatrixFactorization(object):
         with self.session.as_default():
             if not self.is_variables_initialized:
                 self.session.run(tf.global_variables_initializer())
-            feed_dict = {self.graph.input_item_idx: item_indices[valid_inputs]}
-            valid_item_factors = self.session.run(self.graph.item_factors, feed_dict=feed_dict)
+            feed_dict = {self.graph.input_item_pos_idx: item_indices[valid_inputs]}
+            valid_item_factors = self.session.run(self.graph.item_pos_factors, feed_dict=feed_dict)
         
         if normalize:
             valid_item_factors = sklearn.preprocessing.normalize(valid_item_factors, axis=1, norm="l2")
@@ -278,28 +281,24 @@ class MatrixFactorization(object):
         return np.array([id2index.get(i, -1) for i in ids])
     
     def _train_generator_with_negative_sampling_approx(self):
-        """Using random (user, item) pair as a negative sample."""
-        user_train_neg = list(np.random.choice(np.arange(self.n_users), size=len(self.user_train_pos)))
+        """Using random item as a negative sample."""
+        user_train = self.user_train_pos
+        item_train_pos = self.item_train_pos
         item_train_neg = list(np.random.choice(np.arange(self.n_items), size=len(self.item_train_pos)))
-        user_train = self.user_train_pos + user_train_neg
-        item_train = self.item_train_pos + item_train_neg
-        clicks = [1] * len(self.user_train_pos) + [0] * len(self.user_train_pos)
-        train_pairs = list(zip(user_train, item_train, clicks))
+        train_pairs = list(zip(user_train, item_train_pos, item_train_neg))
         random.shuffle(train_pairs)
-        for (user, item, click) in train_pairs:
-            yield user, item, click
+        for (user, item_pos, item_neg) in train_pairs:
+            yield user, item_pos, item_neg
 
     def _test_generator_with_negative_sampling_approx(self):
         """Using random (user, item) pair as a negative sample."""
-        user_test_neg = list(np.random.choice(np.arange(self.n_users), size=len(self.user_test_pos)))
+        user_test = self.user_test_pos
+        item_test_pos = self.item_test_pos
         item_test_neg = list(np.random.choice(np.arange(self.n_items), size=len(self.item_test_pos)))
-        user_test = self.user_test_pos + user_test_neg
-        item_test = self.item_test_pos + item_test_neg
-        clicks = [1] * len(self.user_test_pos) + [0] * len(self.user_test_pos)
-        test_pairs = list(zip(user_test, item_test, clicks))
+        test_pairs = list(zip(user_test, item_test_pos, item_test_neg))
         random.shuffle(test_pairs)
-        for (user, item, click) in test_pairs:
-            yield user, item, click
+        for (user, item_pos, item_neg) in test_pairs:
+            yield user, item_pos, item_neg
     
     def _train(self,
               train_iterator,
@@ -324,11 +323,11 @@ class MatrixFactorization(object):
             while True:
                 try:
                     train_batch_cnt += 1
-                    user_, item_, click_ = self.session.run(train_next_batch)
+                    user_, item_pos_, item_neg_ = self.session.run(train_next_batch)
                     feed_dict = {
                         self.graph.input_user_idx: user_,
-                        self.graph.input_item_idx: item_,
-                        self.graph.input_click: click_,
+                        self.graph.input_item_pos_idx: item_pos_,
+                        self.graph.input_item_neg_idx: item_neg_,
                         self.graph.input_learning_rate: self.learning_rate,
                         self.graph.input_batch_size: len(user_)}
                     _, train_batch_loss, train_batch_error, train_batch_loss_summary, train_batch_error_summary = self.session.run(
@@ -358,11 +357,11 @@ class MatrixFactorization(object):
             while True:
                 try:
                     valid_batch_cnt += 1
-                    user_, item_, click_ = self.session.run(valid_next_batch)
+                    user_, item_pos_, item_neg_ = self.session.run(valid_next_batch)
                     feed_dict = {
                         self.graph.input_user_idx: user_,
-                        self.graph.input_item_idx: item_,
-                        self.graph.input_click: click_,
+                        self.graph.input_item_pos_idx: item_pos_,
+                        self.graph.input_item_neg_idx: item_neg_,
                         self.graph.input_learning_rate: self.learning_rate,
                         self.graph.input_batch_size: len(user_)}
                     valid_batch_loss, valid_batch_error = self.session.run(
@@ -395,8 +394,8 @@ class MatrixFactorization(object):
                 print("Early stopping")
                 break
     
-    def _make_graph(self) -> MatrixFactorizationGrpah:
-        return MatrixFactorizationGrpah(
+    def _make_graph(self) -> BayesianPersonalizedRankingGraph:
+        return BayesianPersonalizedRankingGraph(
             n_users = self.n_users,
             n_items = self.n_items,
             n_latent_factors = self.n_latent_factors,
